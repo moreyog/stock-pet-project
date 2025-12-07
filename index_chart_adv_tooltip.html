@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Local Stock Dashboard — Compact + Momentum Legend</title>
+
+<!-- Chart.js and DataLabels plugin -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+
+<style>
+  body { font-family: Arial, sans-serif; padding: 18px; transition: background 0.25s, color 0.25s; }
+  .container { max-width: 920px; margin: auto; }
+  .controls { margin-bottom:10px; display:flex; gap:12px; align-items:center; }
+  .card { padding:14px; border-radius:10px; margin-bottom:12px; background:#f5f6fb; }
+  canvas { display:block; width:100% !important; max-height:240px; } /* keep charts compact */
+  .legend { margin-top:10px; display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .legend-item { display:flex; gap:8px; align-items:center; padding:6px 8px; border-radius:6px; background:rgba(0,0,0,0.03); font-size:13px; }
+  .dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
+  .pos { color:#0a8b29; font-weight:600; }
+  .neg { color:#c02323; font-weight:600; }
+  .neutral { color:#666; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h3>📊 Local Stock Dashboard — Compact</h3>
+
+  <div class="controls">
+    <input id="fileInput" type="file" accept=".txt,.csv">
+    <button id="toggleMode">Toggle Dark/Light</button>
+  </div>
+
+  <div id="charts" style="display:none;">
+    <div id="card1" class="card">
+      <div style="font-weight:600; margin-bottom:6px;">Price Trend (90D → 30D → 7D → Current)</div>
+      <canvas id="priceChart"></canvas>
+    </div>
+
+    <div id="card2" class="card">
+      <div style="font-weight:600; margin-bottom:6px;">% Change Chart (90→30, 30→7, 7→Current)</div>
+      <canvas id="percentChart"></canvas>
+
+      <!-- Momentum legend inserted here -->
+      <div id="momentumLegend" class="legend" aria-live="polite" style="margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+Chart.register(ChartDataLabels);
+
+let priceChart = null;
+let percentChart = null;
+
+document.getElementById('toggleMode').onclick = () => {
+  document.body.classList.toggle('dark-mode');
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('dark-card'));
+};
+
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    try {
+      const lines = ev.target.result.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) throw new Error('file must have header + at least one data row');
+
+      const priceLabels = ['90D Ago','30D Ago','7D Ago','Current'];
+      const pctLabels = ['90→30D %','30→7D %','7D→Current %'];
+
+      const datasetsPrice = [];
+      const datasetsPercent = [];
+      const legendItems = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(',').map(s => s.trim());
+        if (cols.length < 5) continue;
+
+        const symbol = cols[0];
+        const current = parseFloat(cols[1]);
+        const d7 = parseFloat(cols[2]);
+        const d30 = parseFloat(cols[3]);
+        const d90 = parseFloat(cols[4]);
+
+        const prices = [d90, d30, d7, current];
+
+        const p90_30 = d90 ? ((d30 - d90) / d90 * 100) : 0;
+        const p30_7  = d30 ? ((d7 - d30) / d30 * 100) : 0;
+        const p7_cur = d7  ? ((current - d7) / d7 * 100) : 0;
+
+        const percentNums = [Number(p90_30.toFixed(2)), Number(p30_7.toFixed(2)), Number(p7_cur.toFixed(2))];
+        const avg = Number(((percentNums[0] + percentNums[1] + percentNums[2]) / 3).toFixed(2));
+        const momentum = avg > 0 ? 'Positive' : (avg < 0 ? 'Negative' : 'Neutral');
+        const lineColor = avg >= 0 ? '#0a8b29' : '#c02323';
+        const pointColors = percentNums.map(v => v > 0 ? '#0a8b29' : (v < 0 ? '#c02323' : '#666'));
+
+        datasetsPrice.push({
+          label: symbol,
+          data: prices,
+          borderColor: lineColor,
+          borderWidth: 2,
+          tension: 0.2,
+          pointRadius: 3,
+          fill: false
+        });
+
+        datasetsPercent.push({
+          label: symbol,
+          data: percentNums,
+          borderColor: lineColor,
+          borderWidth: 2,
+          tension: 0.2,
+          pointBackgroundColor: pointColors,
+          pointRadius: 5,
+          fill: false
+        });
+
+        legendItems.push({ symbol, avg, momentum, color: lineColor });
+      }
+
+      document.getElementById('charts').style.display = 'block';
+
+      if (priceChart) priceChart.destroy();
+      if (percentChart) percentChart.destroy();
+
+      // Compact price chart
+      priceChart = new Chart(document.getElementById('priceChart'), {
+        type: 'line',
+        data: { labels: priceLabels, datasets: datasetsPrice },
+        options: {
+          plugins: { legend: { display: false } },
+          maintainAspectRatio: true,
+          aspectRatio: 2.2,
+          scales: { y: { beginAtZero: false } }
+        }
+      });
+
+      // Compact percent chart with datalabels and tooltip summary
+      percentChart = new Chart(document.getElementById('percentChart'), {
+        type: 'line',
+        data: { labels: pctLabels, datasets: datasetsPercent },
+        options: {
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              anchor: 'end',
+              align: 'top',
+              formatter: v => (v >= 0 ? '+' : '') + v + '%',
+              font: { weight: '600', size: 11 }
+            },
+            tooltip: {
+              callbacks: {
+                label: ctx => ctx.dataset.label + ': ' + (ctx.raw >= 0 ? '+' : '') + ctx.raw + '%',
+                afterBody: items => {
+                  const ds = items[0].dataset;
+                  const vals = ds.data.map(Number);
+                  const avg = (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2);
+                  const momentum = avg > 0 ? 'Positive' : (avg < 0 ? 'Negative' : 'Neutral');
+                  return ['Avg: ' + (avg >= 0 ? '+' : '') + avg + '%', 'Momentum: ' + momentum];
+                }
+              }
+            }
+          },
+          maintainAspectRatio: true,
+          aspectRatio: 2.2,
+          scales: {
+            y: { beginAtZero: false, ticks: { callback: v => v + '%' } }
+          }
+        },
+        plugins: [ChartDataLabels]
+      });
+
+      // Render compact momentum legend under the % chart
+      const legendDiv = document.getElementById('momentumLegend');
+      legendDiv.innerHTML = ''; // clear
+      legendItems.forEach(it => {
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.style.background = it.color;
+        const text = document.createElement('div');
+        text.innerHTML = `<strong>${it.symbol}</strong>&nbsp;&nbsp;<span class="${it.avg>0? 'pos' : (it.avg<0? 'neg':'neutral')}">${(it.avg>=0?'+':'')}${it.avg}%</span>&nbsp;&nbsp;<span class="${it.avg>0? 'pos' : (it.avg<0? 'neg':'neutral')}">(${it.momentum})</span>`;
+        item.appendChild(dot);
+        item.appendChild(text);
+        legendDiv.appendChild(item);
+      });
+
+    } catch (err) {
+      alert('Error: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty500 — Strength Detector (Rebuilt & Working)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:Inter,Arial,Helvetica,sans-serif;margin:18px;background:#fbfbfb;color:#111}
+    .top{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    input,select{padding:6px;border:1px solid #ccc;border-radius:6px}
+    button{padding:8px 10px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer}
+    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    #results{margin-top:12px;display:flex;gap:18px}
+    #list{width:360px;max-height:620px;overflow:auto;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    .item{padding:8px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;gap:8px;align-items:center}
+    #charts{flex:1;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    canvas{width:100% !important;max-width:100% !important;height:45vh !important;}
+    .small{font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+  <h3>Nifty500 — Strength Detector</h3>
+
+  <div class="top">
+    <input id="fileInput" type="file" accept=".txt,.csv" />
+
+    <div class="controls">
+      <label class="small"><input type="checkbox" id="useSlope" checked> Use slope filter</label>
+
+      <label class="small">Sort by:
+        <select id="sortBy">
+          <option value="slope">Slope</option>
+          <option value="deviation">Deviation</option>
+        </select>
+      </label>
+
+      <button id="sortDirBtn">Asc ▲</button>
+
+      <label class="small">Window (trend days): <input id="trendDays" type="number" value="5" min="2" style="width:64px"></label>
+      <label class="small">Require dev pct <= <input id="maxDev" type="number" value="0.8" step="0.1" style="width:72px">%</label>
+      <label class="small">Max candidates: <input id="maxC" type="number" value="30" style="width:64px"></label>
+
+      <button id="run">Find candidates</button>
+    </div>
+  </div>
+
+  <div id="results">
+    <div id="list"><em>Load a file and click "Find candidates"</em></div>
+
+    <div id="charts">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <select id="candidateSelect" style="min-width:220px"></select>
+        <button id="showChart">Show chart</button>
+        <button id="selectAll">Check all</button>
+      </div>
+      <canvas id="candidateChart"></canvas>
+      <div id="smaNote" class="small"></div>
+      <div id="sma21Note" class="small"></div>
+      <div id="sma50Note" class="small"></div>
+    </div>
+  </div>
+
+<script>
+// STATE
+let dataSymbols = [];
+let candidates = [];
+let chart = null;
+let sortAsc = true;
+
+// ELEMENTS
+const fileInput = document.getElementById('fileInput');
+const runBtn = document.getElementById('run');
+const listDiv = document.getElementById('list');
+const candidateSelect = document.getElementById('candidateSelect');
+const showChartBtn = document.getElementById('showChart');
+const selectAllBtn = document.getElementById('selectAll');
+const trendDaysInput = document.getElementById('trendDays');
+const maxDevInput = document.getElementById('maxDev');
+const maxCInput = document.getElementById('maxC');
+const sortBySelect = document.getElementById('sortBy');
+const sortDirBtn = document.getElementById('sortDirBtn');
+const ctx = document.getElementById('candidateChart').getContext('2d');
+
+//--------------------------------------------
+// SORT TOGGLE
+//--------------------------------------------
+sortDirBtn.addEventListener('click', ()=>{
+  sortAsc = !sortAsc;
+  sortDirBtn.textContent = sortAsc ? 'Asc ▲' : 'Desc ▼';
+  renderList();
+});
+
+//--------------------------------------------
+// FILE LOAD
+//--------------------------------------------
+fileInput.addEventListener('change', async (e)=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const text = await f.text();
+  parseFile(text);
+  listDiv.innerHTML = '<em>File loaded — ready</em>';
+});
+
+function parseFile(text){
+  dataSymbols = [];
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length>0);
+
+  lines.forEach(ln=>{
+    const parts = ln.split(',');
+    if(parts.length < 2) return;
+    const sym = parts[0];
+    if(sym.toLowerCase()==='symbol') return;
+    const prices = parts.slice(1).map(Number).filter(x=>!isNaN(x));
+    if(prices.length>0) dataSymbols.push({symbol:sym, prices});
+  });
+}
+
+//--------------------------------------------
+// SMA CALC
+//--------------------------------------------
+function sma(arr, end, w){
+  if(end-w+1 < 0) return null;
+  let s=0;
+  for(let i=end-w+1; i<=end; i++) s+=arr[i];
+  return s/w;
+}
+
+function computeSeries(prices){
+  const n = prices.length;
+  const sma9 = Array(n).fill(null);
+  const sma21 = Array(n).fill(null);
+  const sma50 = Array(n).fill(null);
+
+  for(let i=0;i<n;i++){
+    if(i>=8) sma9[i] = sma(prices,i,9);
+    if(i>=20) sma21[i] = sma(prices,i,21);
+    if(i>=49) sma50[i] = sma(prices,i,50);
+  }
+  return {sma9,sma21,sma50};
+}
+
+//--------------------------------------------
+// LINEAR SLOPE
+//--------------------------------------------
+function linearSlope(arr){
+  const m=arr.length;
+  if(m<2) return 0;
+  let sx=0, sy=0, sxx=0, sxy=0;
+  for(let i=0;i<m;i++){
+    const x=i, y=arr[i];
+    sx+=x; sy+=y; sxx+=x*x; sxy+=x*y;
+  }
+  const denom = m*sxx - sx*sx;
+  return denom===0 ? 0 : (m*sxy - sx*sy)/denom;
+}
+
+//--------------------------------------------
+// ANALYZE
+//--------------------------------------------
+function analyze(){
+  const trendDays = Number(trendDaysInput.value);
+  const maxDev = Number(maxDevInput.value);
+  const maxC = Number(maxCInput.value);
+  const useSlope = document.getElementById('useSlope').checked;
+
+  candidates = [];
+
+  dataSymbols.forEach(symObj=>{
+    const prices = symObj.prices;
+    const n = prices.length;
+    if(n < 21) return;
+
+    const {sma9,sma21} = computeSeries(prices);
+
+    const valid = [];
+    for(let i=0;i<n;i++) if(sma9[i] && sma21[i]) valid.push(i);
+    if(valid.length < trendDays) return;
+
+    const lastIdxs = valid.slice(-trendDays);
+    const devs = lastIdxs.map(i=>Math.abs((sma21[i] - sma9[i]) / prices[i] * 100));
+
+    const slope = linearSlope(devs);
+    const currDev = devs[devs.length-1];
+
+    if((!useSlope || slope < 0) && currDev <= maxDev){
+      candidates.push({symbol:symObj.symbol, prices, sma9, sma21, slope, currDev});
+    }
+  });
+
+  sortAndLimit(maxC);
+  renderList();
+}
+
+//--------------------------------------------
+// SORT & LIMIT
+//--------------------------------------------
+function sortAndLimit(maxC){
+  const key = sortBySelect.value;
+
+  candidates.sort((a,b)=>{
+    if(key==='deviation') return sortAsc ? a.currDev - b.currDev : b.currDev - a.currDev;
+    return sortAsc ? a.slope - b.slope : b.slope - a.slope;
+  });
+
+  candidates = candidates.slice(0, maxC);
+}
+
+//--------------------------------------------
+// RENDER LIST
+//--------------------------------------------
+function renderList(){
+  if(candidates.length===0){ listDiv.innerHTML='<em>No results</em>'; return; }
+
+  listDiv.innerHTML='';
+  candidateSelect.innerHTML='';
+
+  candidates.forEach((c,idx)=>{
+    const row = document.createElement('div'); row.className='item';
+    row.innerHTML = `<div><strong>${c.symbol}</strong><div class=small>Slope: ${c.slope.toFixed(4)} | Dev: ${c.currDev.toFixed(3)}%</div></div>`;
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.idx=idx;
+    cb.addEventListener('change', ()=>updateChart());
+    row.appendChild(cb);
+    listDiv.appendChild(row);
+
+    const opt=document.createElement('option'); opt.value=idx; opt.text=c.symbol;
+    candidateSelect.appendChild(opt);
+  });
+}
+
+//--------------------------------------------
+// CHART
+//--------------------------------------------
+function updateChart(){
+  const checked = [...listDiv.querySelectorAll('input[type=checkbox]:checked')].map(cb=>Number(cb.dataset.idx));
+  drawChart(checked);
+}
+
+function drawChart(idxs){
+  if(chart) chart.destroy();
+
+  const datasets=[];
+  let labels=[];
+
+  idxs.forEach(i=>{
+    const c=candidates[i];
+    labels = c.prices.map((_,i)=>'D'+i);
+
+    datasets.push({label:c.symbol, data:c.prices, borderWidth:2, pointRadius:0});
+
+    datasets.push({label:c.symbol+" SMA9", data:c.sma9, borderDash:[4,4], pointRadius:0});
+    datasets.push({label:c.symbol+" SMA21", data:c.sma21, borderDash:[6,4], pointRadius:0});
+  });
+
+  chart = new Chart(ctx,{
+    type:'line',
+    data:{labels,datasets},
+    options:{responsive:true,maintainAspectRatio:false}
+  });
+}
+
+//--------------------------------------------
+// BUTTONS
+//--------------------------------------------
+runBtn.addEventListener('click', analyze);
+showChartBtn.addEventListener('click', ()=>{
+  const idx=Number(candidateSelect.value);
+  if(!isNaN(idx)){
+    [...listDiv.querySelectorAll('input[type=checkbox]')][idx].checked=true;
+    updateChart();
+  }
+});
+
+selectAllBtn.addEventListener('click', ()=>{
+  const boxes=[...listDiv.querySelectorAll('input[type=checkbox]')];
+  const all= boxes.every(b=>b.checked);
+  boxes.forEach(b=> b.checked=!all);
+  updateChart();
+});
+
+</script>
+</body>
+</html>

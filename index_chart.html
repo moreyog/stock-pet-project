@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Local Stock Chart</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body style="font-family: Arial; padding: 20px;">
+
+<h2>Stock Prices Trend</h2>
+
+<input type="file" id="fileInput" accept=".txt,.csv">
+<canvas id="chart" width="800" height="400"></canvas>
+
+<script>
+document.getElementById("fileInput").addEventListener("change", function (event) {
+    const file = event.target.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function (e) {
+        const text = e.target.result.trim();
+        const rows = text.split("\n");
+
+        // Parse CSV
+        const labels = ["90D Ago", "30D Ago", "7D Ago", "Current"];
+        const datasets = [];
+
+        for (let i = 1; i < rows.length; i++) {
+            const cols = rows[i].split(",");
+            const symbol = cols[0];
+            const prices = [
+                parseFloat(cols[4]),
+                parseFloat(cols[3]),
+                parseFloat(cols[2]),
+                parseFloat(cols[1])
+            ];
+
+            datasets.push({
+                label: symbol,
+                data: prices,
+                borderWidth: 2,
+                fill: false,
+                tension: 0.2
+            });
+        }
+
+        // Render Chart
+        new Chart(document.getElementById("chart"), {
+            type: "line",
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                scales: {
+                    y: { beginAtZero: false }
+                }
+            }
+        });
+    };
+
+    reader.readAsText(file);
+});
+</script>
+
+</body>
+</html>

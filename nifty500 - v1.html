@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty 500 — 30-day chart (local)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:Inter,Arial, Helvetica, sans-serif;margin:18px;background:#fafafa;color:#111}
+    .topbar{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+    .controls{display:flex;gap:10px;align-items:center}
+    button{padding:8px 10px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer}
+    #legendBox{display:flex;flex-wrap:wrap;gap:8px;max-height:120px;overflow:auto;padding:8px;border:1px solid #e5e5e5;background:#fff}
+    .legend-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;border:1px solid transparent}
+    .legend-item input{cursor:pointer}
+    #chartContainer{max-width:1100px}
+    canvas{background:#fff;border-radius:6px;padding:6px}
+    .search{min-width:220px;padding:6px;border-radius:6px;border:1px solid #ccc}
+  </style>
+</head>
+<body>
+  <h2>Nifty 500 — last 30 days (local file)</h2>
+
+  <div class="topbar">
+    <input id="fileInput" type="file" accept=".txt,.csv" />
+    <div class="controls">
+      <button id="toggleAll" title="Select / Deselect all">Select all</button>
+      <input id="searchInput" class="search" placeholder="Search stock" list="symbolList" />
+      <datalist id="symbolList"></datalist>
+      <button id="addFromSearch">Add<//button>
+    </div>
+  </div>
+
+  <div id="legendBox" aria-live="polite"> <!-- checkboxes for each stock -->
+    (load a file to populate symbols)
+  </div>
+
+  <div id="chartContainer">
+    <canvas id="mainChart" height="260"></canvas>
+  </div>
+
+<script>
+// Uses Chart.js to plot series for selected symbols. Reads a local text file where each line starts with SYMBOL, then numeric price values (most recent last).
+let chart = null;
+let allSymbols = []; // {symbol, values:[]}
+let allChecked = false;
+
+const fileInput = document.getElementById('fileInput');
+const legendBox = document.getElementById('legendBox');
+const toggleAllBtn = document.getElementById('toggleAll');
+const searchInput = document.getElementById('searchInput');
+const addFromSearch = document.getElementById('addFromSearch');
+const ctx = document.getElementById('mainChart').getContext('2d');
+
+fileInput.addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const txt = await file.text();
+  parseAndPopulate(txt);
+});
+
+function parseAndPopulate(text){
+  const symbolList = document.getElementById('symbolList');
+  symbolList.innerHTML = '';
+  const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l.length>0);
+  allSymbols = [];
+  legendBox.innerHTML = '';
+  // try to detect header: if first line contains non-alpha tokens (numbers separated) we assume no header
+  for(let i=0;i<lines.length;i++){
+    const cols = lines[i].split(',').map(c=>c.trim());
+    // skip short rows
+    if(cols.length<2) continue;
+    // if first token is numeric -> maybe header row of dates/percents; ignore
+    if(i===0 && !isNaN(Number(cols[0]))) continue;
+    const symbol = cols[0];
+    const numbers = cols.slice(1).map(x=>({n: Number(x)})).filter(o=>!Number.isNaN(o.n)).map(o=>o.n);
+    if(numbers.length===0) continue;
+    // We'll assume the last value is the most recent day, so order is day0..dayN-1
+    allSymbols.push({symbol, values: numbers});
+  }
+
+  if(allSymbols.length===0){
+    legendBox.textContent = 'No symbol rows found in file.';
+    return;
+  }
+
+  // create checkbox legend (initially unchecked)
+  allSymbols.forEach((s, idx)=>{
+    // add to suggestions
+    const opt = document.createElement('option');
+    opt.value = s.symbol;
+    symbolList.appendChild(opt);
+
+    // existing legend creation((s, idx)=>{
+    const w = document.createElement('label');
+    w.className='legend-item';
+    w.innerHTML = `<input type="checkbox" data-idx="${idx}"> <span style="min-width:80px;display:inline-block">${s.symbol}</span>`;
+    legendBox.appendChild(w);
+  });
+
+  // prepare chart with empty datasets
+  renderChart([]);
+}
+
+function renderChart(selectedIdxs){
+  const labels = getLabels();
+  const datasets = selectedIdxs.map((i,ri)=>{
+    const s = allSymbols[i];
+    return {
+      label: s.symbol,
+      data: s.values,
+      borderWidth: 2,
+      fill: false,
+      tension: 0.2,
+      pointRadius: 0
+    };
+  });
+
+  if(chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
+      plugins: { legend: { display: true } },
+      scales: { x: { display: true }, y: { display: true } }
+    }
+  });
+}
+
+function getLabels(){
+  // Return labels as Day 1 ... Day N (no dates requested)
+  if(allSymbols.length===0) return [];
+  const maxLen = Math.max(...allSymbols.map(s=>s.values.length));
+  const arr = [];
+  for(let i= maxLen - (maxLen) ; i< maxLen ; i++) arr.push('Day ' + (i+1));
+  // above simple. We'll label Day 1 ... Day N
+  return Array.from({length: maxLen}, (_,i)=>'Day ' + (i+1));
+}
+
+// Click handling for legend checkboxes — event delegation
+legendBox.addEventListener('change', (ev)=>{
+  const cb = ev.target;
+  if(cb.tagName !== 'INPUT') return;
+  updateChartFromLegend();
+});
+
+function updateChartFromLegend(){
+  const checked = Array.from(legendBox.querySelectorAll('input[type=checkbox]'))
+    .map(cb=>cb.checked ? Number(cb.dataset.idx) : null).filter(x=>x!==null);
+  renderChart(checked);
+  updateToggleAllButton();
+}
+
+function updateToggleAllButton(){
+  const boxes = Array.from(legendBox.querySelectorAll('input[type=checkbox]'));
+  const checked = boxes.filter(b=>b.checked).length;
+  if(checked === boxes.length && boxes.length>0){
+    toggleAllBtn.textContent = 'Deselect all';
+    allChecked = true;
+  } else {
+    toggleAllBtn.textContent = 'Select all';
+    allChecked = false;
+  }
+}
+
+// toggle all / deselect all using same button
+toggleAllBtn.addEventListener('click', ()=>{
+  const boxes = Array.from(legendBox.querySelectorAll('input[type=checkbox]'));
+  if(boxes.length===0) return;
+  const targetState = !allChecked;
+  boxes.forEach(b=>b.checked = targetState);
+  updateChartFromLegend();
+});
+
+// Search + add flow: when user types symbol and clicks Add, find and check that symbol
+addFromSearch.addEventListener('click', ()=>{
+  const q = searchInput.value.trim().toUpperCase();
+  if(!q) return;
+  const idx = allSymbols.findIndex(s=>s.symbol.toUpperCase() === q);
+  if(idx===-1){
+    alert('Symbol not found: ' + q);
+    return;
+  }
+  const cb = legendBox.querySelector(`input[data-idx="${idx}"]`);
+  if(cb){ cb.checked = true; updateChartFromLegend(); }
+});
+
+searchInput.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter'){ addFromSearch.click(); } });
+
+</script>
+</body>
+</html>

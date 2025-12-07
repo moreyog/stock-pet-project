@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty500 — MACD Trend Change Radar</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:Inter,Arial,Helvetica,sans-serif;margin:18px;background:#fbfbfb;color:#111}
+    .top{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    input,select{padding:6px;border:1px solid #ccc;border-radius:6px}
+    button{padding:8px 10px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer}
+    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    #results{margin-top:12px;display:flex;gap:18px}
+    #list{width:360px;max-height:620px;overflow:auto;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    .item{padding:8px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;gap:8px;align-items:center}
+    #charts{flex:1;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    canvas{width:100% !important;max-width:100% !important;height:45vh !important;}
+    .small{font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+  <h3>Nifty500 — MACD Trend Change Radar</h3>
+
+  <div class="top">
+    <input id="fileInput" type="file" accept=".txt,.csv" />
+
+    <div class="controls">
+      <label class="small">Window (days):
+        <input id="winDays" type="number" value="4" min="2" max="10" style="width:64px">
+      </label>
+
+      <label class="small">Max |MACD−Signal| % of price:
+        <input id="maxHistPct" type="number" value="0.30" step="0.05" style="width:80px">
+      </label>
+
+      <label class="small"><input id="requireSlope" type="checkbox" checked> Require histogram moving towards 0</label>
+
+      <label class="small">Sort by:
+        <select id="sortBy">
+          <option value="hist">Distance to crossover</option>
+          <option value="slope">Histogram slope</option>
+        </select>
+      </label>
+
+      <button id="sortDirBtn">Asc ▲</button>
+
+      <label class="small">Max candidates:
+        <input id="maxC" type="number" value="40" style="width:64px">
+      </label>
+
+      <button id="run">Find MACD candidates</button>
+    </div>
+  </div>
+
+  <div id="results">
+    <div id="list"><em>Load a Nifty500 prices file and click "Find MACD candidates"</em></div>
+
+    <div id="charts">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <select id="candidateSelect" style="min-width:220px"></select>
+        <button id="showChart">Show chart</button>
+        <button id="selectAll">Check all</button>
+      </div>
+      <canvas id="candidateChart"></canvas>
+      <div class="small" id="hint">Hint: smaller |MACD−Signal|% and histogram slope pointing to 0 ⇒ closer to potential trend change.</div>
+    </div>
+  </div>
+
+<script>
+// ---------- STATE ----------
+let dataSymbols = [];   // { symbol, prices[] }
+let candidates  = [];   // analysis result
+let chart       = null;
+let sortAsc     = true;
+
+// ---------- ELEMENTS ----------
+const fileInput       = document.getElementById('fileInput');
+const runBtn          = document.getElementById('run');
+const listDiv         = document.getElementById('list');
+const candidateSelect = document.getElementById('candidateSelect');
+const showChartBtn    = document.getElementById('showChart');
+const selectAllBtn    = document.getElementById('selectAll');
+const winDaysInput    = document.getElementById('winDays');
+const maxHistPctInput = document.getElementById('maxHistPct');
+const maxCInput       = document.getElementById('maxC');
+const sortBySelect    = document.getElementById('sortBy');
+const sortDirBtn      = document.getElementById('sortDirBtn');
+const requireSlopeCb  = document.getElementById('requireSlope');
+const ctx             = document.getElementById('candidateChart').getContext('2d');
+
+// ---------- SORT TOGGLE ----------
+sortDirBtn.addEventListener('click', () => {
+  sortAsc = !sortAsc;
+  sortDirBtn.textContent = sortAsc ? 'Asc ▲' : 'Desc ▼';
+  renderList();
+});
+
+// ---------- FILE LOAD ----------
+fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  parseFile(text);
+  listDiv.innerHTML = '<em>File loaded — ready</em>';
+});
+
+function parseFile(text) {
+  dataSymbols = [];
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+
+  lines.forEach(ln => {
+    const parts = ln.split(',');
+    if (parts.length < 2) return;
+    const sym = parts[0];
+    if (sym.toLowerCase() === 'symbol') return;
+    const prices = parts.slice(1).map(Number).filter(x => !isNaN(x));
+    if (prices.length > 0) dataSymbols.push({ symbol: sym, prices });
+  });
+}
+
+// ---------- EMA & MACD HELPERS ----------
+function emaSeries(prices, period) {
+  const n = prices.length;
+  const out = Array(n).fill(null);
+  if (n < period) return out;
+
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += prices[i];
+  let ema = sum / period;
+  out[period - 1] = ema;
+
+  const k = 2 / (period + 1);
+  for (let i = period; i < n; i++) {
+    ema = (prices[i] - ema) * k + ema;
+    out[i] = ema;
+  }
+  return out;
+}
+
+function emaFromSeries(src, period) {
+  const n = src.length;
+  const out = Array(n).fill(null);
+  const k = 2 / (period + 1);
+  let ema = null;
+  let sum = 0;
+  let count = 0;
+
+  for (let i = 0; i < n; i++) {
+    const v = src[i];
+    if (v == null || isNaN(v)) continue;
+
+    if (ema == null) {
+      sum += v;
+      count++;
+      if (count === period) {
+        ema = sum / period;
+        out[i] = ema;
+      }
+    } else {
+      ema = (v - ema) * k + ema;
+      out[i] = ema;
+    }
+  }
+  return out;
+}
+
+function computeMACD(prices) {
+  const ema12 = emaSeries(prices, 12);
+  const ema26 = emaSeries(prices, 26);
+  const n = prices.length;
+
+  const macd = Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (ema12[i] != null && ema26[i] != null) {
+      macd[i] = ema12[i] - ema26[i];
+    }
+  }
+
+  const signal = emaFromSeries(macd, 9);
+  const hist = Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (macd[i] != null && signal[i] != null) {
+      hist[i] = macd[i] - signal[i];
+    }
+  }
+
+  return { ema12, ema26, macd, signal, hist };
+}
+
+// ---------- LINEAR SLOPE ----------
+function linearSlope(arr) {
+  const filtered = arr.filter(v => v != null && !isNaN(v));
+  const m = filtered.length;
+  if (m < 2) return 0;
+
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < m; i++) {
+    const x = i;
+    const y = filtered[i];
+    sx  += x;
+    sy  += y;
+    sxx += x * x;
+    sxy += x * y;
+  }
+  const denom = m * sxx - sx * sx;
+  return denom === 0 ? 0 : (m * sxy - sx * sy) / denom;
+}
+
+// ---------- ANALYZE ----------
+function analyze() {
+  const winDays    = Number(winDaysInput.value) || 4;
+  const maxHistPct = Number(maxHistPctInput.value) || 0.3;
+  const maxC       = Number(maxCInput.value) || 40;
+  const requireSlope = requireSlopeCb.checked;
+
+  candidates = [];
+
+  dataSymbols.forEach(symObj => {
+    const prices = symObj.prices;
+    const n = prices.length;
+    if (n < 26) return; // need enough data for MACD(12,26)
+
+    const { macd, signal, hist } = computeMACD(prices);
+
+    const validIdx = [];
+    for (let i = 0; i < n; i++) {
+      if (hist[i] != null && !isNaN(hist[i]) && prices[i] != null && !isNaN(prices[i])) {
+        validIdx.push(i);
+      }
+    }
+    if (validIdx.length < winDays + 1) return;
+
+    const lastWindowIdx = validIdx.slice(-winDays);
+    const lastHistPctSeries = lastWindowIdx.map(i => (hist[i] / prices[i]) * 100);
+
+    const lastIdx = validIdx[validIdx.length - 1];
+    const currHistPct = (hist[lastIdx] / prices[lastIdx]) * 100;
+    const firstHistPct = lastHistPctSeries[0];
+
+    const slope = linearSlope(lastHistPctSeries);
+
+    const nearZero = Math.abs(currHistPct) <= maxHistPct;
+
+    let towardsZero = true;
+    if (requireSlope) {
+      if (firstHistPct > 0 && slope < 0) towardsZero = true;
+      else if (firstHistPct < 0 && slope > 0) towardsZero = true;
+      else if (Math.sign(firstHistPct) !== Math.sign(currHistPct)) towardsZero = true; // already crossed
+      else towardsZero = false;
+    }
+
+    if (nearZero && towardsZero) {
+      candidates.push({
+        symbol: symObj.symbol,
+        prices,
+        macd,
+        signal,
+        hist,
+        currHistPct,
+        slope,
+        lastIdx
+      });
+    }
+  });
+
+  sortAndLimit(maxC);
+  renderList();
+}
+
+// ---------- SORT & LIMIT ----------
+function sortAndLimit(maxC) {
+  const key = sortBySelect.value;
+
+  candidates.sort((a, b) => {
+    if (key === 'slope') {
+      return sortAsc ? (a.slope - b.slope) : (b.slope - a.slope);
+    } else {
+      const ah = Math.abs(a.currHistPct);
+      const bh = Math.abs(b.currHistPct);
+      return sortAsc ? (ah - bh) : (bh - ah);
+    }
+  });
+
+  if (maxC > 0 && candidates.length > maxC) {
+    candidates = candidates.slice(0, maxC);
+  }
+}
+
+// ---------- RENDER LIST ----------
+function renderList() {
+  if (!candidates || candidates.length === 0) {
+    listDiv.innerHTML = '<em>No candidates found. Try increasing max |MACD−Signal|% or window.</em>';
+    candidateSelect.innerHTML = '';
+    if (chart) { chart.destroy(); chart = null; }
+    return;
+  }
+
+  listDiv.innerHTML = '';
+  candidateSelect.innerHTML = '';
+
+  candidates.forEach((c, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item';
+
+    const info = document.createElement('div');
+    info.innerHTML = `<strong>${c.symbol}</strong>` +
+      `<div class="small">|MACD−Signal|: ${Math.abs(c.currHistPct).toFixed(3)}%` +
+      ` &nbsp; | Slope (hist%): ${c.slope.toFixed(4)}</div>`;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.idx = idx;
+    cb.addEventListener('change', updateChart);
+
+    row.appendChild(info);
+    row.appendChild(cb);
+    listDiv.appendChild(row);
+
+    const opt = document.createElement('option');
+    opt.value = idx;
+    opt.text = c.symbol;
+    candidateSelect.appendChild(opt);
+  });
+}
+
+// ---------- CHART ----------
+function updateChart() {
+  const checked = [...listDiv.querySelectorAll('input[type=checkbox]:checked')]
+    .map(cb => Number(cb.dataset.idx))
+    .filter(i => !isNaN(i));
+  drawChart(checked);
+}
+
+function drawChart(idxs) {
+  if (chart) {
+    chart.destroy();
+    chart = null;
+  }
+
+  if (!idxs || idxs.length === 0) return;
+
+  const datasets = [];
+  let labels = [];
+
+  idxs.forEach(i => {
+    const c = candidates[i];
+    const n = c.prices.length;
+    labels = Array.from({ length: n }, (_, j) => 'D' + j);
+
+    datasets.push({
+      label: c.symbol + ' Close',
+      data: c.prices,
+      yAxisID: 'yPrice',
+      borderWidth: 2,
+      pointRadius: 0,
+      tension: 0.2
+    });
+
+    datasets.push({
+      label: c.symbol + ' MACD',
+      data: c.macd,
+      yAxisID: 'yMacd',
+      borderWidth: 1,
+      pointRadius: 0,
+      borderDash: [4, 4],
+      tension: 0.2
+    });
+
+    datasets.push({
+      label: c.symbol + ' Signal',
+      data: c.signal,
+      yAxisID: 'yMacd',
+      borderWidth: 1,
+      pointRadius: 0,
+      borderDash: [2, 2],
+      tension: 0.2
+    });
+  });
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      stacked: false,
+      scales: {
+        yPrice: {
+          type: 'linear',
+          position: 'left',
+          title: { display: true, text: 'Price' }
+        },
+        yMacd: {
+          type: 'linear',
+          position: 'right',
+          title: { display: true, text: 'MACD / Signal' },
+          grid: { drawOnChartArea: false }
+        }
+      }
+    }
+  });
+}
+
+// ---------- BUTTON WIRES ----------
+runBtn.addEventListener('click', analyze);
+
+showChartBtn.addEventListener('click', () => {
+  const idx = Number(candidateSelect.value);
+  if (!isNaN(idx)) {
+    const boxes = [...listDiv.querySelectorAll('input[type=checkbox]')];
+    if (boxes[idx]) {
+      boxes[idx].checked = true;
+      updateChart();
+    }
+  }
+});
+
+selectAllBtn.addEventListener('click', () => {
+  const boxes = [...listDiv.querySelectorAll('input[type=checkbox]')];
+  if (boxes.length === 0) return;
+  const allChecked = boxes.every(b => b.checked);
+  boxes.forEach(b => b.checked = !allChecked);
+  updateChart();
+});
+</script>
+</body>
+</html>

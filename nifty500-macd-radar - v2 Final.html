@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty500 — MACD Trend Change Radar (Enhanced)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:Inter,Arial;margin:18px;background:#fbfbfb;color:#111}
+    .top{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    input,select,button{padding:6px;border:1px solid #ccc;border-radius:6px}
+    button{cursor:pointer;background:#fff}
+    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    #results{margin-top:12px;display:flex;gap:18px}
+    #list{width:360px;max-height:640px;overflow:auto;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    .item{padding:8px;border-bottom:1px solid #f0f0f0}
+    .strong{background:#e5ffe5}
+    .medium{background:#fffbe5}
+    #charts{flex:1;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    canvas{width:100%!important;height:45vh!important}
+    .small{font-size:12px;color:#666}
+  </style>
+</head>
+<body>
+<h3>Nifty500 — MACD Trend Change Radar (Bullish Scanner Enabled)</h3>
+
+<div class="top">
+  <input id="fileInput" type="file" accept=".txt,.csv" />
+
+  <div class="controls">
+    <button id="bullishScan">Scan Bullish</button>
+
+    <label class="small">Window:
+      <input id="winDays" type="number" value="4" min="2" max="10" style="width:60px">
+    </label>
+
+    <label class="small">Max |Hist|%:
+      <input id="maxHistPct" type="number" value="0.30" step="0.05" style="width:70px">
+    </label>
+
+    <label class="small">RSI filter:
+      <select id="rsiFilter">
+        <option value="none">None</option>
+        <option value="55">RSI < 55</option>
+        <option value="50">RSI < 50</option>
+        <option value="40-55">40 < RSI < 55</option>
+      </select>
+    </label>
+
+    <label class="small"><input id="highlightStrong" type="checkbox" checked> Highlight strength</label>
+
+    <button id="run">Run</button>
+  </div>
+</div>
+
+<div id="results">
+  <div id="list"><em>Load Nifty500 file to begin</em></div>
+  <div id="charts">
+    <select id="candidateSelect"></select>
+    <button id="showChart">Show Chart</button>
+    <canvas id="candidateChart"></canvas>
+  </div>
+</div>
+
+<script>
+let dataSymbols = [];
+let candidates = [];
+let chart = null;
+const ctx = document.getElementById('candidateChart').getContext('2d');
+
+const fileInput       = document.getElementById('fileInput');
+const runBtn          = document.getElementById('run');
+const bullishBtn      = document.getElementById('bullishScan');
+const listDiv         = document.getElementById('list');
+const winDaysInput    = document.getElementById('winDays');
+const maxHistPctInput = document.getElementById('maxHistPct');
+const rsiFilterInput  = document.getElementById('rsiFilter');
+const hlCheckbox      = document.getElementById('highlightStrong');
+const showChartBtn    = document.getElementById('showChart');
+const candidateSelect = document.getElementById('candidateSelect');
+
+fileInput.addEventListener('change', async(e)=>{
+  const text = await e.target.files[0].text();
+  parseFile(text);
+  listDiv.innerHTML = '<em>File loaded — ready</em>';
+});
+
+function parseFile(text){
+  dataSymbols = [];
+
+  const lines = text.split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+
+  if (lines.length < 2) return;
+
+  // SKIP HEADER ROW (dates)
+  const dataLines = lines.slice(1);
+
+  dataLines.forEach(ln => {
+    const parts = ln.split(',');
+    if (parts.length < 2) return;
+
+    const symbol = parts[0];
+    const prices = parts.slice(1)
+                        .map(Number)
+                        .filter(x => !isNaN(x));
+
+    if (prices.length > 10) {
+      dataSymbols.push({ symbol, prices });
+    }
+  });
+}
+
+
+function emaSeries(prices, period){
+  const n = prices.length;
+  const out = Array(n).fill(null);
+  if(n<period) return out;
+  let sum=0;
+  for(let i=0;i<period;i++) sum+=prices[i];
+  let ema = sum/period;
+  out[period-1] = ema;
+  const k = 2/(period+1);
+  for(let i=period;i<n;i++){
+    ema = (prices[i]-ema)*k + ema;
+    out[i] = ema;
+  }
+  return out;
+}
+function emaFromSeries(src, period){
+  const n = src.length;
+  const out = Array(n).fill(null);
+  let buffer=[];
+  const k = 2/(period+1);
+  let ema=null;
+  for(let i=0;i<n;i++){
+    if(src[i]==null) continue;
+    buffer.push(src[i]);
+    if(buffer.length===period){ ema = buffer.reduce((a,b)=>a+b,0)/period; out[i]=ema; }
+    else if(buffer.length>period){ ema = (src[i]-ema)*k+ema; out[i]=ema; }
+  }
+  return out;
+}
+
+function computeMACD(prices){
+  const ema12=emaSeries(prices,12);
+  const ema26=emaSeries(prices,26);
+  const macd = ema12.map((v,i)=> (v!=null&&ema26[i]!=null? v-ema26[i] : null));
+  const signal = emaFromSeries(macd,9);
+  const hist = macd.map((v,i)=> v!=null&&signal[i]!=null? v-signal[i] : null);
+  return {macd, signal, hist};
+}
+function computeRSI(prices,period=14){
+  if(prices.length<=period) return null;
+  let gains=0,loss=0;
+  for(let i=1;i<=period;i++){
+    const diff=prices[i]-prices[i-1];
+    if(diff>=0) gains+=diff; else loss-=diff;
+  }
+  let avgG=gains/period;
+  let avgL=loss/period;
+  const rsiSeries=Array(prices.length).fill(null);
+  for(let i=period+1;i<prices.length;i++){
+    const diff=prices[i]-prices[i-1];
+    if(diff>=0) avgG=(avgG*(period-1)+diff)/period;
+    else avgL=(avgL*(period-1)+(-diff))/period;
+    const rs= avgL===0?100: avgG/avgL;
+    rsiSeries[i]=100 - (100/(1+rs));
+  }
+  return rsiSeries;
+}
+
+function bullishSettings(){
+  winDaysInput.value = 4;
+  maxHistPctInput.value = 0.25;
+  rsiFilterInput.value = '55';
+}
+
+function analyze(bullishMode=false){
+  const winDays = Number(winDaysInput.value);
+  const maxPct  = Number(maxHistPctInput.value);
+  const rsiSel  = rsiFilterInput.value;
+
+  candidates=[];
+
+  dataSymbols.forEach(obj=>{
+    const prices=obj.prices;
+    if(prices.length<30) return;
+
+    const {macd,signal,hist} = computeMACD(prices);
+
+    const last = prices.length-1;
+    if(hist[last]==null) return;
+
+    const pct = (hist[last]/prices[last])*100;
+    if(Math.abs(pct)>maxPct) return;
+
+    const w=[];
+    for(let i=last-winDays+1;i<=last;i++) if(hist[i]!=null) w.push((hist[i]/prices[i])*100);
+    if(w.length<winDays) return;
+
+    const slope = w[w.length-1] - w[0];
+
+    let bullishOK = true;
+    if(bullishMode){
+      if(hist[last] >= 0) bullishOK=false;
+      if(slope <= 0) bullishOK=false;
+    }
+    if(!bullishOK) return;
+
+    const rsi = computeRSI(prices);
+    const r = rsi?rsi[last]:null;
+    if(rsiSel==='55' && !(r<55)) return;
+    if(rsiSel==='50' && !(r<50)) return;
+    if(rsiSel==='40-55' && !(r>40&&r<55)) return;
+
+    candidates.push({symbol:obj.symbol, prices, macd, signal, hist, pct, slope, r});
+  });
+
+  renderList();
+}
+
+function renderList(){
+  listDiv.innerHTML='';
+  candidateSelect.innerHTML='';
+
+  candidates.sort((a,b)=>Math.abs(a.pct)-Math.abs(b.pct));
+
+  candidates.forEach((c,i)=>{
+    const div=document.createElement('div');
+    div.className='item';
+
+    if(hlCheckbox.checked){
+      if(Math.abs(c.pct)<0.10) div.classList.add('strong');
+      else if(Math.abs(c.pct)<0.20) div.classList.add('medium');
+    }
+
+    div.innerHTML = `<strong>${c.symbol}</strong><br>
+      <span class=small>|Hist|%: ${c.pct.toFixed(3)} | Slope: ${c.slope.toFixed(3)} | RSI: ${c.r?c.r.toFixed(1):'-'}</span>`;
+
+    div.addEventListener('click',()=>showChart(i));
+
+    listDiv.appendChild(div);
+
+    const opt=document.createElement('option');
+    opt.value=i; opt.text=c.symbol;
+    candidateSelect.appendChild(opt);
+  });
+}
+
+function showChart(idx){
+  const c=candidates[idx];
+  if(chart) chart.destroy();
+
+  const labels=c.prices.map((_,i)=>'D'+i);
+
+  chart=new Chart(ctx,{
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {label:c.symbol+' Close', data:c.prices, borderWidth:2, pointRadius:0, yAxisID:'y'},
+        {label:'MACD', data:c.macd, borderDash:[4,4], borderWidth:1, pointRadius:0, yAxisID:'m'},
+        {label:'Signal', data:c.signal, borderDash:[2,2], borderWidth:1, pointRadius:0, yAxisID:'m'}
+      ]},
+    options:{responsive:true, scales:{y:{}, m:{position:'right'}}}
+  });
+}
+
+runBtn.addEventListener('click',()=>analyze(false));
+bullishBtn.addEventListener('click',()=>{bullishSettings(); analyze(true);});
+showChartBtn.addEventListener('click',()=>{
+  const idx=Number(candidateSelect.value);
+  if(!isNaN(idx)) showChart(idx);
+});
+</script>
+</body>
+</html>

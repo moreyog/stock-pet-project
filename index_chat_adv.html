@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Local Stock Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+        transition: background 0.3s, color 0.3s;
+    }
+    .container {
+        max-width: 1000px;
+        margin: auto;
+    }
+    .card {
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 25px;
+        background: #f5f5f5;
+    }
+    .dark-mode {
+        background: #1e1e1e;
+        color: #ddd;
+    }
+    .dark-card {
+        background: #2a2a2a;
+    }
+    button {
+        margin: 10px 0;
+        padding: 10px 18px;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .btn-primary {
+        background: #007bff;
+        color: white;
+    }
+    .btn-dark {
+        background: #333;
+        color: white;
+    }
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h2>📊 Local Stock Dashboard</h2>
+
+<input type="file" id="fileInput" accept=".txt,.csv" class="btn-primary">
+
+<button id="toggleMode" class="btn-dark">Toggle Dark/Light</button>
+
+<div id="charts" style="display:none;">
+
+    <div class="card" id="card1">
+        <h3>Price Trend (90D → 30D → 7D → Current)</h3>
+        <canvas id="priceChart" height="120"></canvas>
+    </div>
+
+    <div class="card" id="card2">
+        <h3>% Change Chart</h3>
+        <canvas id="percentChart" height="120"></canvas>
+    </div>
+
+</div>
+
+</div>
+
+<script>
+let priceChart, percentChart;
+
+document.getElementById("toggleMode").onclick = function() {
+    document.body.classList.toggle("dark-mode");
+    document.getElementById("card1").classList.toggle("dark-card");
+    document.getElementById("card2").classList.toggle("dark-card");
+};
+
+document.getElementById("fileInput").addEventListener("change", function (event) {
+
+    const file = event.target.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function (e) {
+
+        const lines = e.target.result.trim().split("\n");
+
+        const labels = ["90D Ago", "30D Ago", "7D Ago", "Current"];
+        const datasetsPrice = [];
+        const datasetsPercent = [];
+
+        for (let i = 1; i < lines.length; i++) {
+            const cols = lines[i].split(",");
+
+            const symbol = cols[0];
+            const current = parseFloat(cols[1]);
+            const d7 = parseFloat(cols[2]);
+            const d30 = parseFloat(cols[3]);
+            const d90 = parseFloat(cols[4]);
+
+            const prices = [d90, d30, d7, current];
+
+            // % change calculations
+            const percentChanges = [
+                ((d30 - d90) / d90 * 100).toFixed(2),
+                ((d7 - d30) / d30 * 100).toFixed(2),
+                ((current - d7) / d7 * 100).toFixed(2)
+            ];
+
+            datasetsPrice.push({
+                label: symbol,
+                data: prices,
+                borderWidth: 2,
+                fill: false,
+                tension: 0.2
+            });
+
+            datasetsPercent.push({
+                label: symbol,
+                data: percentChanges,
+                borderWidth: 2,
+                fill: false,
+                tension: 0.2
+            });
+        }
+
+        // Show charts section
+        document.getElementById("charts").style.display = "block";
+
+        // Destroy old charts if exist
+        if (priceChart) priceChart.destroy();
+        if (percentChart) percentChart.destroy();
+
+        // Price Chart
+        priceChart = new Chart(document.getElementById("priceChart"), {
+            type: "line",
+            data: { labels, datasets: datasetsPrice },
+            options: {
+                scales: {
+                    y: { beginAtZero: false }
+                }
+            }
+        });
+
+        // % Change Chart
+        percentChart = new Chart(document.getElementById("percentChart"), {
+            type: "line",
+            data: { 
+                labels: ["90→30D %", "30→7D %", "7D→Current %"], 
+                datasets: datasetsPercent 
+            },
+            options: {
+                scales: {
+                    y: { beginAtZero: false }
+                }
+            }
+        });
+
+    };
+
+    reader.readAsText(file);
+});
+</script>
+
+</body>
+</html>

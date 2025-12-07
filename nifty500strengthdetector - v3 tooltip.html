@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty500 — Strength detector (local)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:Inter,Arial,Helvetica,sans-serif;margin:18px;background:#fbfbfb;color:#111}
+    .top{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    input,select{padding:6px;border:1px solid #ccc;border-radius:6px}
+    button{padding:8px 10px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer}
+    .controls{display:flex;gap:8px;align-items:center}
+    #results{margin-top:12px;display:flex;gap:18px}
+    #list{width:360px;max-height:620px;overflow:auto;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    .item{padding:8px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;gap:8px;align-items:center}
+    .item strong{display:block}
+    #charts{flex:1;background:#fff;padding:10px;border:1px solid #e6e6e6;border-radius:6px}
+    canvas{width:100% !important;max-width:100% !important;height:45vh !important;}
+    .small{font-size:12px;color:#666}
+    .params{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <h3>Nifty500 — Strength detector (local file)</h3>
+  <div class="top">
+    <input id="fileInput" type="file" accept=".txt,.csv" />
+    <div class="controls">
+      <label class="small">Window (trend days): <input id="trendDays" type="number" value="5" min="2" style="width:64px"></label>
+      <label class="small">Require dev pct &lt;= <input id="maxDev" type="number" value="0.8" step="0.1" style="width:72px"> %</label>
+      <label class="small">Max candidates: <input id="maxC" type="number" value="30" style="width:64px"></label>
+      <button id="run">Find candidates</button>
+    </div>
+  </div>
+  <div class="small">Notes: file should be the same format you provided: each line starting with SYMBOL, then numeric closing prices (oldest first). If there are fewer than 50 days available the 50-day MA will be computed with available samples (will be less stable).</div>
+
+  <div id="results">
+    <div id="list"><em>Load a file and click "Find candidates"</em></div>
+    <div id="charts">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <select id="candidateSelect" style="min-width:220px"></select>
+        <button id="showChart">Show chart</button>
+        <button id="selectAll">Check all</button>
+      </div>
+      <canvas id="candidateChart"></canvas>
+    </div>
+  </div>
+
+<script>
+// Cleaned script: parse file, compute SMAs, find candidates, render charts with crossover markers and enhanced tooltip
+let dataSymbols = []; // {symbol, prices:[]}
+let candidates = [];
+let chart = null;
+
+const fileInput = document.getElementById('fileInput');
+const runBtn = document.getElementById('run');
+const listDiv = document.getElementById('list');
+const candidateSelect = document.getElementById('candidateSelect');
+const showChartBtn = document.getElementById('showChart');
+const selectAllBtn = document.getElementById('selectAll');
+const trendDaysInput = document.getElementById('trendDays');
+const maxDevInput = document.getElementById('maxDev');
+const maxCInput = document.getElementById('maxC');
+const ctx = document.getElementById('candidateChart').getContext('2d');
+
+fileInput.addEventListener('change', async (e)=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const text = await f.text();
+  parseFile(text);
+  listDiv.innerHTML = '<em>File loaded — ready</em>';
+});
+
+function parseFile(text){
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  dataSymbols = [];
+  for(let ln of lines){
+    const cols = ln.split(',').map(c=>c.trim());
+    // skip empty/header rows
+    if(cols.length<2) continue;
+    if(cols[0].toLowerCase() === 'symbol' || !isNaN(Number(cols[0]))) continue;
+    const sym = cols[0];
+    const vals = cols.slice(1).map(x=>Number(x)).filter(n=>!Number.isNaN(n));
+    if(vals.length===0) continue;
+    dataSymbols.push({symbol: sym, prices: vals});
+  }
+}
+
+function sma(arr, endIndex, window){
+  if(endIndex - window + 1 < 0) return null;
+  let sum = 0;
+  for(let i=endIndex - window + 1; i<=endIndex; i++) sum += arr[i];
+  return sum / window;
+}
+
+function computeSeries(prices){
+  const n = prices.length;
+  const sma9 = new Array(n).fill(null);
+  const sma21 = new Array(n).fill(null);
+  const sma50 = new Array(n).fill(null);
+  for(let i=0;i<n;i++){
+    if(i>=8) sma9[i] = sma(prices,i,9);
+    if(i>=20) sma21[i] = sma(prices,i,21);
+    if(i>=49) sma50[i] = sma(prices,i,50);
+  }
+  return {sma9,sma21,sma50};
+}
+
+function linearSlope(yArr){
+  const m = yArr.length;
+  if(m<2) return 0;
+  let sx=0, sy=0, sxx=0, sxy=0;
+  for(let i=0;i<m;i++){
+    const x=i; const y=yArr[i];
+    sx += x; sy += y; sxx += x*x; sxy += x*y;
+  }
+  const denom = m*sxx - sx*sx;
+  if(denom===0) return 0;
+  return (m*sxy - sx*sy)/denom;
+}
+
+function analyze(){
+  const trendDays = Math.max(2, Number(trendDaysInput.value) || 5);
+  const maxDev = Number(maxDevInput.value) || 0.8;
+  const maxCandidates = Number(maxCInput.value) || 30;
+  candidates = [];
+
+  dataSymbols.forEach(s=>{
+    const prices = s.prices.slice();
+    const n = prices.length;
+    if(n < Math.max(9, trendDays)) return;
+    const {sma9,sma21} = computeSeries(prices);
+
+    const validIdxs = [];
+    for(let i=0;i<n;i++) if(sma9[i]!=null && sma21[i]!=null) validIdxs.push(i);
+    if(validIdxs.length < trendDays) return;
+
+    const lastIdxs = validIdxs.slice(-trendDays);
+    const devs = lastIdxs.map(i=>((sma21[i]-sma9[i]) / prices[i]) * 100);
+    const absDevs = devs.map(x=>Math.abs(x));
+
+    const slope = linearSlope(absDevs);
+    const currentAbs = absDevs[absDevs.length-1];
+
+    const last = prices[n-1];
+    const lastNago = prices[Math.max(0, n-1-trendDays)];
+    const pct5 = ((last - lastNago)/lastNago)*100;
+
+    if(slope < 0 && currentAbs <= maxDev){
+      candidates.push({symbol: s.symbol, slope, currentAbs, pct5, prices, sma9, sma21});
+    }
+  });
+
+  candidates.sort((a,b)=>a.slope - b.slope);
+  candidates = candidates.slice(0, Math.max(0, Math.min(candidates.length, Number(maxCandidates))));
+
+  renderList();
+}
+
+function renderList(){
+  if(candidates.length===0){
+    listDiv.innerHTML = '<em>No candidates found with current settings.</em>';
+    candidateSelect.innerHTML = '';
+    if(chart){ chart.destroy(); chart = null; }
+    return;
+  }
+  candidateSelect.innerHTML = '';
+  listDiv.innerHTML = '';
+  candidates.forEach((c,idx)=>{
+    const row = document.createElement('div'); row.className='item';
+    const left = document.createElement('div');
+    left.innerHTML = `<strong>${c.symbol}</strong><div class="small">slope: ${c.slope.toFixed(6)} | dev%: ${c.currentAbs.toFixed(3)}% | last ${trendDaysInput.value}d: ${c.pct5.toFixed(2)}%</div>`;
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.idx = idx;
+    cb.addEventListener('change', updateChartFromList);
+    row.appendChild(left);
+    row.appendChild(cb);
+    listDiv.appendChild(row);
+
+    const opt = document.createElement('option'); opt.value = idx; opt.text = c.symbol; candidateSelect.appendChild(opt);
+  });
+}
+
+function updateChartFromList(){
+  const checkedIdxs = Array.from(listDiv.querySelectorAll('input[type=checkbox]:checked')).map(n=>Number(n.dataset.idx));
+  drawChart(checkedIdxs);
+}
+
+function drawChart(idxs){
+  if(chart) chart.destroy();
+
+  const datasets = [];
+  const labels = candidates.length? candidates[0].prices.map((_,i)=>'Day '+(i+1)):[];
+
+  idxs.forEach(i=>{
+    const c = candidates[i];
+
+    // Main price line
+    datasets.push({
+      label: c.symbol,
+      data: c.prices,
+      type:'line',
+      fill:false,
+      tension:0.2,
+      pointRadius:0,
+      borderWidth:2
+    });
+
+    // Crossovers
+    const bullish = [];
+    const bearish = [];
+    for(let j=1; j<c.prices.length; j++){
+      const p9_prev = c.sma9[j-1], p21_prev = c.sma21[j-1];
+      const p9 = c.sma9[j], p21 = c.sma21[j];
+      if(p9_prev && p21_prev && p9 && p21){
+        if(p9 > p21 && p9_prev <= p21_prev) bullish.push({x:j, y:c.prices[j]});
+        if(p9 < p21 && p9_prev >= p21_prev) bearish.push({x:j, y:c.prices[j]});
+      }
+    }
+
+    datasets.push({
+      label: c.symbol + ' Bullish',
+      type:'scatter',
+      data: bullish,
+      pointStyle:'triangle',
+      pointBackgroundColor:'green',
+      pointRadius:8
+    });
+
+    datasets.push({
+      label: c.symbol + ' Bearish',
+      type:'scatter',
+      data: bearish,
+      pointStyle:'triangle',
+      rotation:180,
+      pointBackgroundColor:'red',
+      pointRadius:8
+    });
+  });
+
+  chart = new Chart(ctx, {
+    type:'line',
+    data:{ labels, datasets },
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      interaction:{mode:'nearest',axis:'x',intersect:false},
+      plugins:{
+        legend:{display:true},
+        tooltip:{
+          callbacks:{
+            label:function(ctx){
+              const symbol = ctx.dataset.label.split(' ')[0];
+              const price = ctx.raw;
+              const dayIndex = ctx.dataIndex;
+              const c = candidates.find(o => o.symbol === symbol);
+              const sma9 = c && c.sma9 ? c.sma9[dayIndex] : null;
+              const sma21 = c && c.sma21 ? c.sma21[dayIndex] : null;
+
+              let signal = '';
+              if(ctx.dataset.label.includes('Bullish')) signal = '🔺 Bullish crossover';
+              if(ctx.dataset.label.includes('Bearish')) signal = '🔻 Bearish crossover';
+
+              return [
+                symbol,
+                `Price: ₹${price}`,
+                signal
+              ];
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+runBtn.addEventListener('click', ()=>{ analyze(); });
+
+showChartBtn.addEventListener('click', ()=>{
+  const sel = candidateSelect.value;
+  if(sel==="") return;
+  const idx = Number(sel);
+  if(Number.isNaN(idx) || !candidates[idx]) return;
+  Array.from(listDiv.querySelectorAll('input[type=checkbox]')).forEach(cb=>cb.checked = false);
+  const cb = listDiv.querySelector(`input[data-idx='${idx}']`);
+  if(cb){ cb.checked = true; updateChartFromList(); }
+});
+
+selectAllBtn.addEventListener('click', ()=>{
+  const boxes = Array.from(listDiv.querySelectorAll('input[type=checkbox]'));
+  const allChecked = boxes.length && boxes.every(b=>b.checked);
+  boxes.forEach(b=>b.checked = !allChecked);
+  updateChartFromList();
+});
+
+</script>
+</body>
+</html>

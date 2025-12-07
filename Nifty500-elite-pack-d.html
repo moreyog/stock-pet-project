@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Nifty500 — Elite Trend Scanner (Option Pack D)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:18px;background:#f5f5f7;color:#111}
+    h3{margin-top:0}
+    .top{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:12px;align-items:center}
+    input,select,button{padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-size:13px}
+    button{cursor:pointer;background:#fff}
+    button.primary{background:#2563eb;color:#fff;border-color:#1d4ed8}
+    button.primary:hover{background:#1d4ed8}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+    #results{margin-top:12px;display:flex;gap:18px;align-items:flex-start}
+    #list{width:420px;max-height:680px;overflow:auto;background:#fff;padding:10px;border:1px solid #e2e2e6;border-radius:10px}
+    .item{padding:8px;border-bottom:1px solid #f1f1f4;font-size:13px;cursor:pointer}
+    .item:last-child{border-bottom:none}
+    .score-badge{display:inline-block;min-width:32px;text-align:center;padding:2px 6px;border-radius:999px;font-size:11px;margin-right:6px}
+    .score-strong{background:#16a34a1a;color:#166534}
+    .score-medium{background:#eab3081f;color:#854d0e}
+    .score-weak{background:#e5e7eb;color:#374151}
+    .flags{font-size:11px;margin-top:3px;color:#4b5563}
+    .flag{display:inline-block;padding:1px 5px;border-radius:999px;margin-right:4px;border:1px solid #e5e7eb}
+    .flag-bull{border-color:#16a34a;color:#166534}
+    .flag-div{border-color:#7c3aed;color:#5b21b6}
+    .flag-sq{border-color:#0ea5e9;color:#0369a1}
+    .flag-risk{border-color:#dc2626;color:#b91c1c}
+    #charts{flex:1;min-width:0;background:#fff;padding:10px;border:1px solid #e2e2e6;border-radius:10px}
+    canvas{width:100%!important;height:48vh!important}
+    .small{font-size:11px;color:#6b7280}
+    .row{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+    .pill{font-size:11px;padding:2px 6px;border-radius:999px;background:#eef2ff;color:#3730a3}
+  </style>
+</head>
+<body>
+<h3>Nifty500 — Elite Trend Scanner (Option Pack D)</h3>
+<div class="small" style="margin-bottom:8px">Load Nifty500 EOD prices (Symbol, close1, close2, ...). Tool computes MACD, RSI, EMA trend, pseudo-ADX/ATR, Bollinger squeeze, higher-low & RSI divergence, then ranks by score (0–100).</div>
+
+<div class="top">
+  <input id="fileInput" type="file" accept=".txt,.csv" />
+
+  <div class="controls">
+    <button id="scanElite" class="primary">Scan (Elite)</button>
+    <button id="scanBullish">Quick Bullish</button>
+
+    <label class="small">Max |MACD−Signal| %:
+      <input id="maxHistPct" type="number" value="0.40" step="0.05" style="width:64px">
+    </label>
+
+    <label class="small">Min Score:
+      <input id="minScore" type="number" value="60" step="1" style="width:60px">
+    </label>
+
+    <label class="small">Max candidates:
+      <input id="maxC" type="number" value="60" step="10" style="width:64px">
+    </label>
+
+    <label class="small"><input id="bullishOnly" type="checkbox" checked> Bullish bias</label>
+
+    <label class="small">RSI filter:
+      <select id="rsiFilter">
+        <option value="none">None</option>
+        <option value="pref-oversold" selected>Prefer oversold (35–55)</option>
+        <option value="no-overbought">Block &gt; 70</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<div id="results">
+  <div id="list"><em>Load a file and click “Scan (Elite)”</em></div>
+
+  <div id="charts">
+    <div class="row">
+      <select id="candidateSelect" style="min-width:220px"></select>
+      <button id="showChart">Show Chart</button>
+      <span id="summary" class="small"></span>
+    </div>
+    <canvas id="candidateChart"></canvas>
+    <div class="small" style="margin-top:6px">
+      Score composition: MACD proximity (25) · Hist slope (10) · RSI zone (10) · Higher-low (10) · RSI divergence (20) · EMA trend (10) · ADX (10) · BB squeeze (5).
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------- State ----------
+let dataSymbols = [];   // [{symbol, prices[]}]
+let candidates  = [];   // enriched + score
+let chart       = null;
+
+// ---------- DOM ----------
+const fileInput       = document.getElementById('fileInput');
+const listDiv         = document.getElementById('list');
+const scanEliteBtn    = document.getElementById('scanElite');
+const scanBullishBtn  = document.getElementById('scanBullish');
+const maxHistPctInput = document.getElementById('maxHistPct');
+const minScoreInput   = document.getElementById('minScore');
+const maxCInput       = document.getElementById('maxC');
+const bullishOnlyCb   = document.getElementById('bullishOnly');
+const rsiFilterSel    = document.getElementById('rsiFilter');
+const candidateSelect = document.getElementById('candidateSelect');
+const showChartBtn    = document.getElementById('showChart');
+const summarySpan     = document.getElementById('summary');
+const ctx             = document.getElementById('candidateChart').getContext('2d');
+
+// ---------- File parsing ----------
+fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  parseFile(text);
+  listDiv.innerHTML = '<em>File loaded — click “Scan (Elite)”</em>';
+  candidates = [];
+  candidateSelect.innerHTML = '';
+  summarySpan.textContent = '';
+  if (chart) { chart.destroy(); chart = null; }
+});
+
+function parseFile(text) {
+  dataSymbols = [];
+  const lines = text.split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+
+  if (lines.length < 2) return;
+
+  // First row is header: Symbol, date1, date2, ... → skip
+  const dataLines = lines.slice(1);
+
+  dataLines.forEach(ln => {
+    const parts = ln.split(',');
+    if (parts.length < 3) return;
+    const symbol = parts[0];
+    const prices = parts.slice(1).map(Number).filter(x => !isNaN(x));
+    if (prices.length >= 80) { // need enough history for BB / ADX etc
+      dataSymbols.push({ symbol, prices });
+    }
+  });
+}
+
+// ---------- Math helpers ----------
+function emaSeries(arr, period) {
+  const n = arr.length;
+  const out = Array(n).fill(null);
+  if (n < period) return out;
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += arr[i];
+  let ema = sum / period;
+  out[period - 1] = ema;
+  const k = 2 / (period + 1);
+  for (let i = period; i < n; i++) {
+    ema = (arr[i] - ema) * k + ema;
+    out[i] = ema;
+  }
+  return out;
+}
+
+function smaAt(arr, endIdx, period) {
+  if (endIdx - period + 1 < 0) return null;
+  let sum = 0;
+  for (let i = endIdx - period + 1; i <= endIdx; i++) sum += arr[i];
+  return sum / period;
+}
+
+function stdAt(arr, endIdx, period) {
+  const mean = smaAt(arr, endIdx, period);
+  if (mean == null) return null;
+  let s2 = 0;
+  for (let i = endIdx - period + 1; i <= endIdx; i++) {
+    const d = arr[i] - mean;
+    s2 += d * d;
+  }
+  return Math.sqrt(s2 / period);
+}
+
+// ---------- Indicators ----------
+function computeMACD(prices) {
+  const ema12 = emaSeries(prices, 12);
+  const ema26 = emaSeries(prices, 26);
+  const n = prices.length;
+  const macd = Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (ema12[i] != null && ema26[i] != null) macd[i] = ema12[i] - ema26[i];
+  }
+  const signal = emaFromSeries(macd, 9);
+  const hist = Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (macd[i] != null && signal[i] != null) hist[i] = macd[i] - signal[i];
+  }
+  return { macd, signal, hist };
+}
+
+function emaFromSeries(src, period) {
+  const n = src.length;
+  const out = Array(n).fill(null);
+  let buffer = [];
+  const k = 2 / (period + 1);
+  let ema = null;
+  for (let i = 0; i < n; i++) {
+    const v = src[i];
+    if (v == null) continue;
+    buffer.push(v);
+    if (buffer.length === period) {
+      ema = buffer.reduce((a, b) => a + b, 0) / period;
+      out[i] = ema;
+    } else if (buffer.length > period) {
+      ema = (v - ema) * k + ema;
+      out[i] = ema;
+    }
+  }
+  return out;
+}
+
+function computeRSI(prices, period = 14) {
+  const n = prices.length;
+  if (n <= period) return Array(n).fill(null);
+  const rsi = Array(n).fill(null);
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff >= 0) gain += diff; else loss -= diff;
+  }
+  let avgG = gain / period;
+  let avgL = loss / period;
+  for (let i = period + 1; i < n; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff >= 0) {
+      avgG = (avgG * (period - 1) + diff) / period;
+      avgL = (avgL * (period - 1)) / period;
+    } else {
+      avgG = (avgG * (period - 1)) / period;
+      avgL = (avgL * (period - 1) + (-diff)) / period;
+    }
+    const rs = avgL === 0 ? 100 : avgG / avgL;
+    rsi[i] = 100 - 100 / (1 + rs);
+  }
+  return rsi;
+}
+
+// Pseudo ATR from closes only (approximation)
+function computeATRfromClose(prices, period = 14) {
+  const n = prices.length;
+  const atr = Array(n).fill(null);
+  if (n < period + 1) return atr;
+  const tr = Array(n).fill(null);
+  for (let i = 1; i < n; i++) {
+    tr[i] = Math.abs(prices[i] - prices[i - 1]);
+  }
+  let sum = 0;
+  for (let i = 1; i <= period; i++) sum += tr[i];
+  let atrVal = sum / period;
+  atr[period] = atrVal;
+  for (let i = period + 1; i < n; i++) {
+    atrVal = (atrVal * (period - 1) + tr[i]) / period;
+    atr[i] = atrVal;
+  }
+  return atr;
+}
+
+// Pseudo ADX from closes (approximate directional movement)
+function computeADXfromClose(prices, period = 14) {
+  const n = prices.length;
+  const adx = Array(n).fill(null);
+  if (n < period * 2) return adx;
+
+  const tr = Array(n).fill(0);
+  const dmPlus = Array(n).fill(0);
+  const dmMinus = Array(n).fill(0);
+
+  for (let i = 1; i < n; i++) {
+    const upMove = prices[i] - prices[i - 1];
+    const downMove = prices[i - 1] - prices[i];
+    dmPlus[i] = (upMove > 0 && upMove > downMove) ? upMove : 0;
+    dmMinus[i] = (downMove > 0 && downMove > upMove) ? downMove : 0;
+    tr[i] = Math.abs(prices[i] - prices[i - 1]);
+  }
+
+  let trN = 0, dmPlusN = 0, dmMinusN = 0;
+  for (let i = 1; i <= period; i++) {
+    trN += tr[i];
+    dmPlusN += dmPlus[i];
+    dmMinusN += dmMinus[i];
+  }
+
+  const dx = Array(n).fill(null);
+  let diPlus = 100 * (dmPlusN / trN);
+  let diMinus = 100 * (dmMinusN / trN);
+  dx[period] = 100 * Math.abs(diPlus - diMinus) / Math.max(1e-6, (diPlus + diMinus));
+
+  const alpha = (period - 1) / period;
+
+  for (let i = period + 1; i < n; i++) {
+    trN = alpha * trN + tr[i];
+    dmPlusN = alpha * dmPlusN + dmPlus[i];
+    dmMinusN = alpha * dmMinusN + dmMinus[i];
+    diPlus = 100 * (dmPlusN / Math.max(1e-6, trN));
+    diMinus = 100 * (dmMinusN / Math.max(1e-6, trN));
+    dx[i] = 100 * Math.abs(diPlus - diMinus) / Math.max(1e-6, (diPlus + diMinus));
+  }
+
+  // Smooth DX to ADX
+  let sumDX = 0;
+  let start = period;
+  let end = period * 2 - 1;
+  if (end >= n) end = n - 1;
+  for (let i = start; i <= end; i++) sumDX += dx[i] || 0;
+  let adxVal = sumDX / (end - start + 1);
+  adx[end] = adxVal;
+
+  for (let i = end + 1; i < n; i++) {
+    adxVal = (adxVal * (period - 1) + (dx[i] || 0)) / period;
+    adx[i] = adxVal;
+  }
+  return adx;
+}
+
+// Bollinger Band width (normalized by price)
+function computeBBWidth(prices, period = 20) {
+  const n = prices.length;
+  const widths = Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const std = stdAt(prices, i, period);
+    const mean = smaAt(prices, i, period);
+    if (std == null || !mean) continue;
+    const width = (4 * std) / mean; // (Upper-Lower)/Mean with k=2
+    widths[i] = width;
+  }
+  return widths;
+}
+
+// Higher-low & RSI divergence detection (very simple swing-based)
+function detectStructure(prices, rsi) {
+  const n = prices.length;
+  const lookRecent = 40;
+  const lookPrev = 40;
+  if (n < lookRecent + lookPrev + 5) {
+    return { hasHigherLow: false, hasDivergence: false, lastLowIdx: null, prevLowIdx: null };
+  }
+  const recentStart = n - lookRecent;
+  const recentEnd = n - 1;
+  const prevStart = Math.max(0, n - lookRecent - lookPrev);
+  const prevEnd = recentStart - 1;
+  if (prevEnd <= prevStart) {
+    return { hasHigherLow: false, hasDivergence: false, lastLowIdx: null, prevLowIdx: null };
+  }
+
+  let lastLowIdx = recentStart;
+  for (let i = recentStart + 1; i <= recentEnd; i++) {
+    if (prices[i] < prices[lastLowIdx]) lastLowIdx = i;
+  }
+
+  let prevLowIdx = prevStart;
+  for (let i = prevStart + 1; i <= prevEnd; i++) {
+    if (prices[i] < prices[prevLowIdx]) prevLowIdx = i;
+  }
+
+  const hasHigherLow = prices[lastLowIdx] > prices[prevLowIdx];
+
+  let hasDivergence = false;
+  if (rsi && rsi[lastLowIdx] != null && rsi[prevLowIdx] != null) {
+    if (prices[lastLowIdx] < prices[prevLowIdx] && rsi[lastLowIdx] > rsi[prevLowIdx]) {
+      hasDivergence = true;
+    }
+  }
+
+  return { hasHigherLow, hasDivergence, lastLowIdx, prevLowIdx };
+}
+
+// ---------- Scoring ----------
+function trendLabelFromEMA(price, ema5, ema20, idx) {
+  if (ema5[idx] == null || ema20[idx] == null) return 'Unknown';
+  const p = price[idx];
+  if (p > ema5[idx] && ema5[idx] > ema20[idx]) return 'Strong Bull';
+  if (p >= ema20[idx] && ema5[idx] >= ema20[idx]) return 'Mild Bull';
+  if (p > ema20[idx]) return 'Recovery';
+  if (p < ema20[idx] && ema5[idx] < ema20[idx]) return 'Bear';
+  return 'Sideways';
+}
+
+function scoreCandidate(feat, params) {
+  const { absHistPct, slope, rsiLast, hasHigherLow, hasDivergence, trendLabel, squeezeRatio, adxLast } = feat;
+  let score = 0;
+  const reasons = [];
+
+  // 1) MACD proximity (25)
+  if (absHistPct != null && params.maxHistPct > 0) {
+    let prox = (params.maxHistPct - absHistPct) / params.maxHistPct;
+    if (prox < 0) prox = 0;
+    if (prox > 1) prox = 1;
+    const pts = prox * 25;
+    score += pts;
+    if (pts > 10) reasons.push('Close MACD/Signal');
+  }
+
+  // 2) Histogram slope (10)
+  if (slope != null && slope > 0) {
+    const norm = Math.min(1, slope / 0.12); // 0.12%+ over window considered very strong
+    const pts = norm * 10;
+    score += pts;
+    if (pts > 4) reasons.push('Histogram rising');
+  }
+
+  // 3) RSI zone (10)
+  if (rsiLast != null) {
+    let pts = 0;
+    if (rsiLast >= 35 && rsiLast <= 55) pts = 10;        // sweet spot
+    else if (rsiLast >= 30 && rsiLast < 35) pts = 7;
+    else if (rsiLast > 55 && rsiLast <= 65) pts = 5;
+    else if (rsiLast > 65 && rsiLast <= 75) pts = 2;
+    score += pts;
+    if (pts >= 7) reasons.push('RSI in value zone');
+  }
+
+  // 4) Higher-low (10)
+  if (hasHigherLow) {
+    score += 10;
+    reasons.push('Higher low');
+  }
+
+  // 5) RSI divergence (20)
+  if (hasDivergence) {
+    score += 20;
+    reasons.push('Bullish RSI divergence');
+  }
+
+  // 6) EMA trend (10)
+  if (trendLabel === 'Strong Bull') {
+    score += 10;
+    reasons.push('Strong EMA trend');
+  } else if (trendLabel === 'Mild Bull') {
+    score += 7;
+  } else if (trendLabel === 'Recovery') {
+    score += 5;
+  } else if (trendLabel === 'Sideways') {
+    score += 3;
+  }
+
+  // 7) ADX (10)
+  if (adxLast != null) {
+    if (adxLast >= 30) {
+      score += 10;
+      reasons.push('Strong ADX trend');
+    } else if (adxLast >= 25) {
+      score += 7;
+    } else if (adxLast >= 20) {
+      score += 4;
+    }
+  }
+
+  // 8) BB squeeze (5)
+  if (squeezeRatio != null) {
+    if (squeezeRatio < 0.6) {
+      score += 5;
+      reasons.push('Band squeeze');
+    } else if (squeezeRatio < 0.8) {
+      score += 3;
+    }
+  }
+
+  return { score: Math.round(score), reasons };
+}
+
+// ---------- Analysis ----------
+function analyze(options) {
+  const maxHistPct = Number(maxHistPctInput.value) || 0.4;
+  const minScore   = Number(minScoreInput.value) || 60;
+  const maxC       = Number(maxCInput.value) || 60;
+  const rsiMode    = rsiFilterSel.value;
+  const bullishOnly = options.bullishBias;
+
+  candidates = [];
+
+  dataSymbols.forEach(obj => {
+    const prices = obj.prices;
+    const n = prices.length;
+    if (n < 80) return;
+
+    const { macd, signal, hist } = computeMACD(prices);
+    const rsi = computeRSI(prices, 14);
+    const ema5 = emaSeries(prices, 5);
+    const ema20 = emaSeries(prices, 20);
+    const atr = computeATRfromClose(prices, 14);
+    const adx = computeADXfromClose(prices, 14);
+    const bbWidth = computeBBWidth(prices, 20);
+
+    const last = n - 1;
+    if (hist[last] == null || macd[last] == null || signal[last] == null) return;
+    const lastPrice = prices[last];
+
+    const histPct = (hist[last] / lastPrice) * 100;
+    const absHistPct = Math.abs(histPct);
+    if (absHistPct > maxHistPct) return;
+
+    // Window slope over last 5 days (hist% of price)
+    const win = 5;
+    const histPctWin = [];
+    for (let i = last - win + 1; i <= last; i++) {
+      if (i >= 0 && hist[i] != null) histPctWin.push((hist[i] / prices[i]) * 100);
+    }
+    if (histPctWin.length < 2) return;
+    const slope = histPctWin[histPctWin.length - 1] - histPctWin[0];
+
+    // Bullish bias: want MACD histogram negative but rising, or just turned positive
+    if (bullishOnly) {
+      if (!(hist[last] <= 0 || hist[last - 1] < 0)) return;
+      if (slope <= 0) return;
+    }
+
+    const rsiLast = rsi[last];
+    if (rsiMode === 'no-overbought' && rsiLast != null && rsiLast > 70) return;
+
+    // Structure & divergence
+    const { hasHigherLow, hasDivergence } = detectStructure(prices, rsi);
+
+    // EMA trend
+    const trendLabel = trendLabelFromEMA(prices, ema5, ema20, last);
+
+    // BB squeeze ratio using last 60 widths
+    let squeezeRatio = null;
+    if (bbWidth[last] != null) {
+      const look = 60;
+      let start = Math.max(0, last - look + 1);
+      let sum = 0, cnt = 0;
+      for (let i = start; i <= last; i++) {
+        if (bbWidth[i] != null) {
+          sum += bbWidth[i];
+          cnt++;
+        }
+      }
+      if (cnt > 10) {
+        const avg = sum / cnt;
+        if (avg > 0) squeezeRatio = bbWidth[last] / avg;
+      }
+    }
+
+    const adxLast = adx[last];
+
+    const { score, reasons } = scoreCandidate({
+      absHistPct,
+      slope,
+      rsiLast,
+      hasHigherLow,
+      hasDivergence,
+      trendLabel,
+      squeezeRatio,
+      adxLast
+    }, { maxHistPct });
+
+    if (score < minScore) return;
+
+    // Simple RSI mode preference (not hard filter except above)
+    let rsiBias = 0;
+    if (rsiMode === 'pref-oversold' && rsiLast != null) {
+      if (rsiLast >= 35 && rsiLast <= 55) rsiBias = 3;
+      else if (rsiLast > 65) rsiBias = -2;
+    }
+
+    const finalScore = Math.max(0, Math.min(100, score + rsiBias));
+
+    candidates.push({
+      symbol: obj.symbol,
+      prices,
+      macd,
+      signal,
+      hist,
+      rsi,
+      ema5,
+      ema20,
+      atr,
+      adx,
+      bbWidth,
+      histPct,
+      absHistPct,
+      slope,
+      rsiLast,
+      hasHigherLow,
+      hasDivergence,
+      trendLabel,
+      squeezeRatio,
+      adxLast,
+      score: Math.round(finalScore),
+      reasons
+    });
+  });
+
+  // Sort and limit
+  candidates.sort((a, b) => b.score - a.score || a.absHistPct - b.absHistPct);
+  if (candidates.length > maxC) candidates = candidates.slice(0, maxC);
+
+  renderList();
+}
+
+// ---------- Render list ----------
+function renderList() {
+  listDiv.innerHTML = '';
+  candidateSelect.innerHTML = '';
+  summarySpan.textContent = candidates.length ? `${candidates.length} candidates` : '';
+
+  if (!candidates.length) {
+    listDiv.innerHTML = '<em>No candidates match filters. Try lowering Min Score or increasing Max |MACD−Signal| %.</em>';
+    if (chart) { chart.destroy(); chart = null; }
+    return;
+  }
+
+  candidates.forEach((c, idx) => {
+    const row = document.createElement('div');
+    row.className = 'item';
+
+    const scoreBadge = document.createElement('span');
+    scoreBadge.className = 'score-badge ' + (c.score >= 75 ? 'score-strong' : c.score >= 60 ? 'score-medium' : 'score-weak');
+    scoreBadge.textContent = c.score;
+
+    const title = document.createElement('span');
+    title.innerHTML = `<strong>${c.symbol}</strong> · |Hist| ${c.absHistPct.toFixed(3)}% · RSI ${c.rsiLast ? c.rsiLast.toFixed(1) : '-'} · ADX ${c.adxLast ? c.adxLast.toFixed(1) : '-'}`;
+
+    const line1 = document.createElement('div');
+    line1.appendChild(scoreBadge);
+    line1.appendChild(title);
+
+    const flags = document.createElement('div');
+    flags.className = 'flags';
+
+    const trendPill = document.createElement('span');
+    trendPill.className = 'pill';
+    trendPill.textContent = c.trendLabel;
+    flags.appendChild(trendPill);
+
+    if (c.hasHigherLow) {
+      const f = document.createElement('span');
+      f.className = 'flag flag-bull';
+      f.textContent = 'HL';
+      flags.appendChild(f);
+    }
+    if (c.hasDivergence) {
+      const f = document.createElement('span');
+      f.className = 'flag flag-div';
+      f.textContent = 'RSI Div';
+      flags.appendChild(f);
+    }
+    if (c.squeezeRatio != null && c.squeezeRatio < 0.8) {
+      const f = document.createElement('span');
+      f.className = 'flag flag-sq';
+      f.textContent = 'Sq';
+      flags.appendChild(f);
+    }
+    if (c.atr && c.atr[c.prices.length - 1] != null) {
+      const f = document.createElement('span');
+      f.className = 'flag flag-risk';
+      const atrVal = c.atr[c.prices.length - 1];
+      const atrPct = (atrVal / c.prices[c.prices.length - 1]) * 100;
+      f.textContent = `ATR ${atrPct.toFixed(1)}%`;
+      flags.appendChild(f);
+    }
+
+    row.appendChild(line1);
+    row.appendChild(flags);
+
+    row.addEventListener('click', () => {
+      candidateSelect.value = String(idx);
+      drawChart(idx);
+    });
+
+    listDiv.appendChild(row);
+
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = `${c.symbol} (${c.score})`;
+    candidateSelect.appendChild(opt);
+  });
+}
+
+// ---------- Chart ----------
+function drawChart(idx) {
+  const c = candidates[idx];
+  if (!c) return;
+  if (chart) { chart.destroy(); chart = null; }
+
+  const n = c.prices.length;
+  const labels = Array.from({ length: n }, (_, i) => 'D' + i);
+  const last = n - 1;
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: c.symbol + ' Close',
+          data: c.prices,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.15,
+          yAxisID: 'yPrice'
+        },
+        {
+          label: 'EMA 5',
+          data: c.ema5,
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [4, 3],
+          tension: 0.15,
+          yAxisID: 'yPrice'
+        },
+        {
+          label: 'EMA 20',
+          data: c.ema20,
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [2, 2],
+          tension: 0.15,
+          yAxisID: 'yPrice'
+        },
+        {
+          label: 'MACD',
+          data: c.macd,
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [5, 4],
+          tension: 0.1,
+          yAxisID: 'yMACD'
+        },
+        {
+          label: 'Signal',
+          data: c.signal,
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [2, 3],
+          tension: 0.1,
+          yAxisID: 'yMACD'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      stacked: false,
+      scales: {
+        yPrice: {
+          type: 'linear',
+          position: 'left',
+          title: { display: true, text: 'Price' }
+        },
+        yMACD: {
+          type: 'linear',
+          position: 'right',
+          title: { display: true, text: 'MACD' },
+          grid: { drawOnChartArea: false }
+        }
+      }
+    }
+  });
+
+  const info = [];
+  info.push(`Score ${c.score}`);
+  if (c.trendLabel) info.push(c.trendLabel);
+  if (c.rsiLast != null) info.push(`RSI ${c.rsiLast.toFixed(1)}`);
+  if (c.adxLast != null) info.push(`ADX ${c.adxLast.toFixed(1)}`);
+  if (c.squeezeRatio != null) info.push(`Sq ${c.squeezeRatio.toFixed(2)}`);
+  summarySpan.textContent = info.join(' · ');
+}
+
+// ---------- Button handlers ----------
+scanEliteBtn.addEventListener('click', () => {
+  if (!dataSymbols.length) {
+    alert('Please load a Nifty500 prices file first.');
+    return;
+  }
+  analyze({ bullishBias: bullishOnlyCb.checked });
+});
+
+scanBullishBtn.addEventListener('click', () => {
+  if (!dataSymbols.length) {
+    alert('Please load a Nifty500 prices file first.');
+    return;
+  }
+  // Quick defaults for strong bullish reversal hunt
+  maxHistPctInput.value = '0.30';
+  minScoreInput.value = '65';
+  bullishOnlyCb.checked = true;
+  rsiFilterSel.value = 'pref-oversold';
+  analyze({ bullishBias: true });
+});
+
+showChartBtn.addEventListener('click', () => {
+  const idx = Number(candidateSelect.value);
+  if (!isNaN(idx)) drawChart(idx);
+});
+</script>
+</body>
+</html>
